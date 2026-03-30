@@ -1,4 +1,4 @@
-// #ifdef PLUGINS_NEW
+#ifdef PLUGINS_NEW
 
 
 #include <stdio.h>
@@ -53,9 +53,10 @@ int dependency_checker_post_thread(mambo_context *ctx){
         t_data->total_expensive);
 
 
-return 0;
+    return 0;
+}
 
-int dep_chain_pre_inst(mambo_context *ctx) {
+int dependency_checker_pre_inst(mambo_context *ctx) {
   thread_data_t *td = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
   if (td == NULL) return 0;
 
@@ -67,6 +68,8 @@ int dep_chain_pre_inst(mambo_context *ctx) {
    * Uses ctx->code.inst (PIE enum) for classification.
    * No register extraction yet — that is Block 5.
    * ---------------------------------------------------------------- */
+  emit_counter64_incr(ctx, &td->total_instr , 1);
+
   switch (inst) {
 
   /* LONG: all memory load instructions */
@@ -87,7 +90,7 @@ int dep_chain_pre_inst(mambo_context *ctx) {
   case RISCV_C_LWSP:
   case RISCV_C_FLWSP:
   case RISCV_C_LDSP:
-    fprintf(stderr, "[dep_chain] LONG      at %p (scan time)\n", pc);
+    emit_counter64_incr(ctx, &td->total_long , 1);
     break;
 
   /* EXPENSIVE: integer mul/div (M-extension) */
@@ -109,7 +112,7 @@ int dep_chain_pre_inst(mambo_context *ctx) {
   case RISCV_FDIV_S:
   case RISCV_FMUL_D:
   case RISCV_FDIV_D:
-    fprintf(stderr, "[dep_chain] EXPENSIVE at %p (scan time)\n", pc);
+    emit_counter64_incr(ctx, &td->total_expensive , 1);
     break;
 
   default:
@@ -133,11 +136,10 @@ __attribute__((constructor)) void dependency_checker_init(void) {
     assert(ret == MAMBO_SUCCESS);
 
 
-    ret = mambo_register_pre_inst_cb(ctx, dep_chain_pre_inst);
+    ret = mambo_register_pre_inst_cb(ctx, dependency_checker_pre_inst);
     assert(ret == MAMBO_SUCCESS);
 }
 
 
 
-
-// #endif /* PLUGINS_NEW */
+#endif /* PLUGINS_NEW */
