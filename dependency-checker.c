@@ -1,4 +1,4 @@
-// #ifdef PLUGINS_NEW
+#ifdef PLUGINS_NEW
 
 
 #include <stdio.h>
@@ -83,7 +83,7 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
    * No register extraction yet — that is Block 5.
    * ---------------------------------------------------------------- */
 
-    uint32_t imm11_0, funct7, rs2_f, rs1_f, funct3, rd_f, opcode_f;
+    uint32_t imm_f, rs2_f, rs1_f, rd_f;
 
     emit_counter64_incr(ctx, &td->total_instr , 1);   
 
@@ -99,14 +99,14 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
     case RISCV_FLW:
     case RISCV_FLD:
         assert(mambo_is_load(ctx));
-        riscv_lw_decode_fields(ctx->code.read_address,
-                           &imm11_0, &rs1_f, &funct3, &rd_f, &opcode_f);
+        riscv_lw_decode_fields((uint16_t *)ctx->code.read_address,
+                               &rd_f, &rs1_f, &imm_f);
         fprintf(stderr,
-            "[dep_chain] LONG      %p  rd=%s(%u)  base=%s(%u)  imm=%d\n",
-            pc,
-            REG_NAME(rd_f),  rd_f,
-            REG_NAME(rs1_f), rs1_f,
-            (int32_t)imm11_0);
+                "[dep_chain] LONG      %p  rd=%s(%u)  base=%s(%u)  imm=%d\n",
+                pc,
+                REG_NAME(rd_f),  rd_f,
+                REG_NAME(rs1_f), rs1_f,
+                (int)imm_f);
         emit_counter64_incr(ctx, &td->total_long, 1);
         break;
     /* compressed loads (compressed instructions are not in the scope but handled anyways relevant for future work) */
@@ -141,15 +141,15 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
     case RISCV_FDIV_S:
     case RISCV_FMUL_D:
     case RISCV_FDIV_D:
-            
-        riscv_add_decode_fields(ctx->code.read_address,
-                           &funct7, &rs2_f, &rs1_f, &funct3, &rd_f, &opcode_f);
+        riscv_add_decode_fields((uint16_t *)ctx->code.read_address,
+                        &rd_f, &rs1_f, &rs2_f);
         fprintf(stderr,
             "[dep_chain] EXPENSIVE %p  rd=%s(%u)  rs1=%s(%u)  rs2=%s(%u)\n",
             pc,
             REG_NAME(rd_f),  rd_f,
             REG_NAME(rs1_f), rs1_f,
-            REG_NAME(rs2_f), rs2_f);    
+            REG_NAME(rs2_f), rs2_f);
+
         emit_counter64_incr(ctx, &td->total_expensive , 1);
         break;    
     default:
@@ -176,4 +176,4 @@ __attribute__((constructor)) void dependency_checker_init(void) {
 
 
 
-// #endif /* PLUGINS_NEW */
+#endif /* PLUGINS_NEW */
