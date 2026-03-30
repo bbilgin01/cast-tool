@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <inttypes.h>
+#include <stdbool.h>
 
 #include "../plugins.h"
 
@@ -29,8 +31,6 @@ typedef struct {
         uint64_t total_expensive;
         inst_info_t window[WINDOW_SIZE];
         int window_count;
-        uint64_t bb_long_count; //in scope of basic block
-        uint64_t bb_expensive_count; 
 } thread_data_t;
 
 
@@ -120,30 +120,57 @@ static void decode_inst_info(mambo_context *ctx, inst_info_t *info) {
     if (info->dest_reg == 0) info->dest_reg = -1;
 }
 
+
+static bool detect_lej(
+    const inst_info_t *window, int window_count,
+    int l_idx, int e_idx,
+    const inst_info_t *j,
+    int *out_rd_l, int *out_rd_e)
+    {
+
+    const inst_info_t *L = &window[l_idx];
+    const inst_info_t *E = &window[e_idx];
+    if (L->iclass != INST_LONG || E->iclass != INST_EXPENSIVE) return false;
+    int rd_l = L->dest_reg, rd_e = E->dest_reg;
+    if (rd_l < 0 || rd_e < 0)          return false;
+    if (rd_l == rd_e)                   return false;
+    if (abs(l_idx - e_idx) > MAX_GAP)  return false;
+    bool j_reads_rdl = (j->src_reg[0]==rd_l || j->src_reg[1]==rd_l);
+    bool j_reads_rde = (j->src_reg[0]==rd_e || j->src_reg[1]==rd_e);
+    if (!j_reads_rdl || !j_reads_rde)        return false;
+    if (j->src_reg[0] < 0 || j->src_reg[1] < 0) return false;
+    int first = (l_idx<e_idx)?l_idx:e_idx;
+    int second= (l_idx<e_idx)?e_idx:l_idx;
+    if (e_idx>l_idx && (E->src_reg[0]==rd_l||E->src_reg[1]==rd_l)) return false;
+    if (l_idx>e_idx && L->src_reg[0]==rd_e)                         return false;
+    int first_rd = window[first].dest_reg;
+    for (int k = first+1; k < second; k++) {
+      const inst_info_t *mid = &window[k];
+      if (mid->dest_reg==rd_l || mid->dest_reg==rd_e) return false;
+      if (first_rd>=0 &&
+          (mid->src_reg[0]==first_rd||mid->src_reg[1]==first_rd) &&
+          mid->dest_reg>=0 &&
+          (window[second].src_reg[0]==mid->dest_reg||
+           window[second].src_reg[1]==mid->dest_reg)) return false;
+    }
+    for (int k = second+1; k < window_count; k++) {
+      if (window[k].dest_reg==rd_l || window[k].dest_reg==rd_e) return false;
+    }
+    *out_rd_l = rd_l; *out_rd_e = rd_e;
+    return true;
+}
+
+
 int dependency_checker_pre_thread(mambo_context *ctx){
-
-    fprintf(stderr, "dependency_checker: pre thread callback\n");
     thread_data_t *t_data = (thread_data_t *)mambo_alloc(ctx, sizeof(thread_data_t));
-
     assert(t_data != NULL);
-    memset(t_data, 0, sizeof(thread_data_t));
-
-    int ret = mambo_set_thread_plugin_data(ctx,t_data);
-    assert(ret == MAMBO_SUCCESS);
-
-    fprintf(stderr, "[dep_chain] thread %d started — data allocated at %p\n",
-        mambo_get_thread_id(ctx), (void *)t_data);
-
+    assert(mambo_set_thread_plugin_data(ctx, t_data) == MAMBO_SUCCESS);
     return 0;
 }
 
 int dependency_checker_post_thread(mambo_context *ctx){
-
-   fprintf(stderr, "dependency_checker: post thread callback\n");
-
    thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
    assert(t_data != NULL);
-
    fprintf(stderr,
         "[dep_chain] thread %d exited — "
         "total=%"PRIu64" long=%"PRIu64" expensive=%"PRIu64"\n",
@@ -151,34 +178,64 @@ int dependency_checker_post_thread(mambo_context *ctx){
         t_data->total_instr,
         t_data->total_long,
         t_data->total_expensive);
-
-
     return 0;
 }
 
+int dependency_checker_pre_bb(mambo_context *ctx) {
+  thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
+  if (t_data) t_data->window_count = 0;
+  return 0;
+}
+
+
 int dependency_checker_pre_inst(mambo_context *ctx) {
-    thread_data_t *td = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
-    if (td == NULL) return 0;
+    thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
+    if (t_data == NULL) return 0;
 
     void *pc = mambo_get_source_addr(ctx);
     int   inst = mambo_get_inst(ctx);
     inst_info_t curr_inst;
+
+    emit_counter64_incr(ctx, &t_data->total_instr, 1);
+
     decode_inst_info(ctx, &curr_inst);
     if (curr_inst.iclass == INST_LONG) {
-      emit_counter64_incr(ctx, &td->total_long, 1);
-      td->bb_long_count++;
+      emit_counter64_incr(ctx, &t_data->total_long, 1);
     } else if (curr_inst.iclass == INST_EXPENSIVE) {
-      emit_counter64_incr(ctx, &td->total_expensive, 1);
-      td->bb_expensive_count++;
+      emit_counter64_incr(ctx, &t_data->total_expensive, 1);
+    }
+
+
+      /* Chain detection — fprintf only, no hash map yet */
+    if (curr_inst.src_reg[0] >= 0 && curr_inst.src_reg[1] >= 0) {
+     int wc = t_data->window_count;
+     for (int long_idx = 0; long_idx < wc; long_idx++) {
+       if (t_data->window[long_idx].iclass != INST_LONG) continue;
+       for (int expensive_idx = 0; expensive_idx < wc; expensive_idx++) {
+         if (expensive_idx == long_idx || t_data->window[expensive_idx].iclass != INST_EXPENSIVE) continue;
+         int rd_l = -1, rd_e = -1;
+         if (!detect_lej(t_data->window, wc, long_idx, expensive_idx, &curr_inst, &rd_l, &rd_e)) continue;
+         fprintf(stderr,
+           "[dep_chain] CHAIN FOUND (scan time):\n"
+           "  L: %-36s @ 0x%"PRIxPTR"\n"
+           "  E: %-36s @ 0x%"PRIxPTR"\n"
+           "  J: %-36s @ 0x%"PRIxPTR"\n"
+           "  dep_regs: %s, %s\n",
+           t_data->window[long_idx].text, t_data->window[long_idx].pc,
+           t_data->window[expensive_idx].text, t_data->window[expensive_idx].pc,
+           curr_inst.text, curr_inst.pc,
+           REG_NAME(rd_l), REG_NAME(rd_e));
+       }
+     }
     }
 
     /* Slide the window */
-    if (td->window_count < WINDOW_SIZE) {
-      td->window[td->window_count++] = curr_inst;
+    if (t_data->window_count < WINDOW_SIZE) {
+      t_data->window[t_data->window_count++] = curr_inst;
     } else {
-      memmove(&td->window[0], &td->window[1],
+      memmove(&t_data->window[0], &t_data->window[1],
               (WINDOW_SIZE - 1) * sizeof(inst_info_t));
-      td->window[WINDOW_SIZE - 1] = curr_inst;
+      t_data->window[WINDOW_SIZE - 1] = curr_inst;
     }
 
     return 0;
@@ -194,10 +251,11 @@ __attribute__((constructor)) void dependency_checker_init(void) {
     assert(ret == MAMBO_SUCCESS);
     ret = mambo_register_post_thread_cb(ctx, dependency_checker_post_thread);
     assert(ret == MAMBO_SUCCESS);
+    ret = mambo_register_pre_bb_cb(ctx, dependency_checker_pre_bb);
+    assert(ret == MAMBO_SUCCESS);
     ret = mambo_register_pre_inst_cb(ctx, dependency_checker_pre_inst);
     assert(ret == MAMBO_SUCCESS);
+
 }
-
-
 
 #endif /* PLUGINS_NEW */
