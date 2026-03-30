@@ -1,4 +1,4 @@
-#ifdef PLUGINS_NEW
+// #ifdef PLUGINS_NEW
 
 
 #include <stdio.h>
@@ -8,6 +8,20 @@
 
 #include "../plugins.h"
 
+
+
+/* for readable output */
+static const char *const rv_reg_abi[32] = {
+  "zero","ra","sp","gp","tp","t0","t1","t2",
+  "s0",  "s1","a0","a1","a2","a3","a4","a5",
+  "a6",  "a7","s2","s3","s4","s5","s6","s7",
+  "s8",  "s9","s10","s11","t3","t4","t5","t6"
+};
+#define REG_NAME(r) (((r) >= 0 && (r) < 32) ? rv_reg_abi[(r)] : "?")
+
+
+
+/*per-thread data*/
 typedef struct {
         uint64_t total_instr;
         uint64_t total_long;
@@ -57,72 +71,92 @@ int dependency_checker_post_thread(mambo_context *ctx){
 }
 
 int dependency_checker_pre_inst(mambo_context *ctx) {
-  thread_data_t *td = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
-  if (td == NULL) return 0;
+    thread_data_t *td = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
+    if (td == NULL) return 0;
 
-  void *pc = mambo_get_source_addr(ctx);
-  int   inst = mambo_get_inst(ctx);
+    void *pc = mambo_get_source_addr(ctx);
+    int   inst = mambo_get_inst(ctx);
 
   /* ----------------------------------------------------------------
    * Classification switch — mirrors instruction_mix.c structure.
    * Uses ctx->code.inst (PIE enum) for classification.
    * No register extraction yet — that is Block 5.
    * ---------------------------------------------------------------- */
-  emit_counter64_incr(ctx, &td->total_instr , 1);
 
-  switch (inst) {
+    uint32_t imm11_0, funct7, rs2_f, rs1_f, funct3, rd_f, opcode_f;
 
-  /* LONG: all memory load instructions */
-  case RISCV_LB:
-  case RISCV_LH:
-  case RISCV_LW:
-  case RISCV_LBU:
-  case RISCV_LHU:
-  case RISCV_LWU:
-  case RISCV_LD:
-  case RISCV_FLW:
-  case RISCV_FLD:
-  /* compressed loads (compressed instructions are not in the scope but handled anyways relevant for future work) */
-  case RISCV_C_FLD:
-  case RISCV_C_LW:
-  case RISCV_C_LD:
-  case RISCV_C_FLDSP:
-  case RISCV_C_LWSP:
-  case RISCV_C_FLWSP:
-  case RISCV_C_LDSP:
-    emit_counter64_incr(ctx, &td->total_long , 1);
-    break;
+    emit_counter64_incr(ctx, &td->total_instr , 1);   
 
-  /* EXPENSIVE: integer mul/div (M-extension) */
-  case RISCV_MUL:
-  case RISCV_MULH:
-  case RISCV_MULHSU:
-  case RISCV_MULHU:
-  case RISCV_DIV:
-  case RISCV_DIVU:
-  case RISCV_REM:
-  case RISCV_REMU:
-  case RISCV_MULW:
-  case RISCV_DIVW:
-  case RISCV_DIVUW:
-  case RISCV_REMW:
-  case RISCV_REMUW:
-  /* EXPENSIVE: FP mul/div */
-  case RISCV_FMUL_S:
-  case RISCV_FDIV_S:
-  case RISCV_FMUL_D:
-  case RISCV_FDIV_D:
-    emit_counter64_incr(ctx, &td->total_expensive , 1);
-    break;
-
-  default:
-    break;
-  }
-
-  return 0;
+    switch (inst) { 
+    /* LONG: all memory load instructions */
+    case RISCV_LB:
+    case RISCV_LH:
+    case RISCV_LW:
+    case RISCV_LBU:
+    case RISCV_LHU:
+    case RISCV_LWU:
+    case RISCV_LD:
+    case RISCV_FLW:
+    case RISCV_FLD:
+        assert(mambo_is_load(ctx));
+        riscv_lw_decode_fields(ctx->code.read_address,
+                           &imm11_0, &rs1_f, &funct3, &rd_f, &opcode_f);
+        fprintf(stderr,
+            "[dep_chain] LONG      %p  rd=%s(%u)  base=%s(%u)  imm=%d\n",
+            pc,
+            REG_NAME(rd_f),  rd_f,
+            REG_NAME(rs1_f), rs1_f,
+            (int32_t)imm11_0);
+        emit_counter64_incr(ctx, &td->total_long, 1);
+        break;
+    /* compressed loads (compressed instructions are not in the scope but handled anyways relevant for future work) */
+    case RISCV_C_FLD:
+    case RISCV_C_LW:
+    case RISCV_C_LD:
+    case RISCV_C_FLDSP:
+    case RISCV_C_LWSP:
+    case RISCV_C_FLWSP:
+    case RISCV_C_LDSP:
+        fprintf(stderr,
+            "[dep_chain] LONG(c)   %p  (compressed — regs not tracked)\n",
+            pc);
+        emit_counter64_incr(ctx, &td->total_long , 1);
+        break;    
+    /* EXPENSIVE: integer mul/div (M-extension) */
+    case RISCV_MUL:
+    case RISCV_MULH:
+    case RISCV_MULHSU:
+    case RISCV_MULHU:
+    case RISCV_DIV:
+    case RISCV_DIVU:
+    case RISCV_REM:
+    case RISCV_REMU:
+    case RISCV_MULW:
+    case RISCV_DIVW:
+    case RISCV_DIVUW:
+    case RISCV_REMW:
+    case RISCV_REMUW:
+    /* EXPENSIVE: FP mul/div */
+    case RISCV_FMUL_S:
+    case RISCV_FDIV_S:
+    case RISCV_FMUL_D:
+    case RISCV_FDIV_D:
+            
+        riscv_add_decode_fields(ctx->code.read_address,
+                           &funct7, &rs2_f, &rs1_f, &funct3, &rd_f, &opcode_f);
+        fprintf(stderr,
+            "[dep_chain] EXPENSIVE %p  rd=%s(%u)  rs1=%s(%u)  rs2=%s(%u)\n",
+            pc,
+            REG_NAME(rd_f),  rd_f,
+            REG_NAME(rs1_f), rs1_f,
+            REG_NAME(rs2_f), rs2_f);    
+        emit_counter64_incr(ctx, &td->total_expensive , 1);
+        break;    
+    default:
+      break;
+    }   
+    return 0;
 }
-
-
 
 __attribute__((constructor)) void dependency_checker_init(void) {
 
@@ -142,4 +176,4 @@ __attribute__((constructor)) void dependency_checker_init(void) {
 
 
 
-#endif /* PLUGINS_NEW */
+// #endif /* PLUGINS_NEW */
