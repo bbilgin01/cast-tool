@@ -1,3 +1,12 @@
+/*
+LEJ Dependency Chain Detector 
+
+L -> Long type of Instructions -> In case of cache misses, mem operations are 100cycle ops, therefore counted as long
+E- > Expensive type of Instructions -> mul/div/fmul/fdiv computational heavy, hardware and resource expensive instructions
+J -> Join type of Instructions -> Any type of instruction that has 2 operand registers whose registers are dependent on both L and E type of instructions, 
+and the instruction is within a certain window size (16 in this case) of both L and E.
+*/
+
 #ifdef PLUGINS_NEW
 
 
@@ -13,7 +22,7 @@
 
 #define WINDOW_SIZE 16
 #define MAX_GAP     4
-
+#define CHAIN_MAP_INIT 1024
 typedef enum { INST_OTHER=0, INST_LONG=1, INST_EXPENSIVE=2 } inst_class_t;
 
 typedef struct {
@@ -24,6 +33,15 @@ typedef struct {
   char         text[80];
 } inst_info_t;
 
+typedef struct chain_entry chain_entry_t;
+struct chain_entry {
+  uint64_t       count;
+  uintptr_t      long_addr, expensive_addr, join_addr;
+  int            dep_reg_l, dep_reg_e, chain_id;
+  char           long_text[80], expensive_text[80], join_text[80];
+  chain_entry_t *next;
+};
+
 /*per-thread data*/
 typedef struct {
         uint64_t total_instr;
@@ -32,6 +50,11 @@ typedef struct {
         inst_info_t window[WINDOW_SIZE];
         int window_count;
 } thread_data_t;
+
+
+static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+static chain_entry_t *g_chain_list = NULL;  //global linked list of unique chains, protected by g_mutex
+static int g_next_chain_id = 0;             //global chain ID generator, protected by g_mutex
 
 
 /* for readable output */
@@ -164,6 +187,14 @@ static bool detect_lej(
 int dependency_checker_pre_thread(mambo_context *ctx){
     thread_data_t *t_data = (thread_data_t *)mambo_alloc(ctx, sizeof(thread_data_t));
     assert(t_data != NULL);
+    memset(t_data, 0, sizeof(thread_data_t));
+    
+    /*mambo hash table*/
+    t_data->chain_map = (mambo_ht_t *)mambo_alloc(ctx, sizeof(mambo_ht_t));
+    assert(t_data->chain_map != NULL);
+    assert(mambo_ht_init(t_data->chain_map, CHAIN_MAP_INIT, 0, 80, true) == 0);
+    /*mambo hash table*/
+
     assert(mambo_set_thread_plugin_data(ctx, t_data) == MAMBO_SUCCESS);
     return 0;
 }
@@ -251,7 +282,7 @@ __attribute__((constructor)) void dependency_checker_init(void) {
     assert(ret == MAMBO_SUCCESS);
     ret = mambo_register_post_thread_cb(ctx, dependency_checker_post_thread);
     assert(ret == MAMBO_SUCCESS);
-    ret = mambo_register_pre_bb_cb(ctx, dependency_checker_pre_bb);
+    ret = mambo_register_pre_basic_block_cb(ctx, dependency_checker_pre_bb);
     assert(ret == MAMBO_SUCCESS);
     ret = mambo_register_pre_inst_cb(ctx, dependency_checker_pre_inst);
     assert(ret == MAMBO_SUCCESS);
