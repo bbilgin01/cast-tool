@@ -15,6 +15,7 @@ and the instruction is within a certain window size (16 in this case) of both L 
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #include "../plugins.h"
 
@@ -198,7 +199,7 @@ int dependency_checker_post_thread(mambo_context *ctx){
    assert(t_data != NULL);
 
   int thread_chains = 0;
-  for(int i = 0;  t_data->chain_map->size; i++){
+  for(int i = 0; i < t_data->chain_map->size; i++){
     if(t_data->chain_map->entries[i].key != 0) thread_chains++;
   }
 
