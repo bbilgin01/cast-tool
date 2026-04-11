@@ -228,17 +228,17 @@ static void write_chains(void) {
     char *sym_l=NULL,*sym_e=NULL,*sym_j=NULL;
     char *file_l=NULL,*file_e=NULL,*file_j=NULL;
     void *sa_l=NULL,*sa_e=NULL,*sa_j=NULL;
-    get_symbol_info_by_addr(ce->l_addr,&sym_l,&sa_l,&file_l);
-    get_symbol_info_by_addr(ce->e_addr,&sym_e,&sa_e,&file_e);
-    get_symbol_info_by_addr(ce->j_addr,&sym_j,&sa_j,&file_j);
+    get_symbol_info_by_addr(ce->long_addr,&sym_l,&sa_l,&file_l);
+    get_symbol_info_by_addr(ce->expensive_addr,&sym_e,&sa_e,&file_e);
+    get_symbol_info_by_addr(ce->join_addr,&sym_j,&sa_j,&file_j);
     fprintf(f,"chain_%d | dep_regs: %s, %s | occurred %"PRIu64" times\n",
             ce->chain_id,REG_NAME(ce->dep_reg_l),REG_NAME(ce->dep_reg_e),ce->count);
     fprintf(f,"  0x%016"PRIxPTR"  %-36s # (L) producer  [%s | %s]\n",
-            ce->l_addr,ce->l_text,sym_l?sym_l:"(none)",file_l?file_l:"(unknown)");
+            ce->long_addr,ce->long_text,sym_l?sym_l:"(none)",file_l?file_l:"(unknown)");
     fprintf(f,"  0x%016"PRIxPTR"  %-36s # (E) producer  [%s | %s]\n",
-            ce->e_addr,ce->e_text,sym_e?sym_e:"(none)",file_e?file_e:"(unknown)");
+            ce->expensive_addr,ce->expensive_text,sym_e?sym_e:"(none)",file_e?file_e:"(unknown)");
     fprintf(f,"  0x%016"PRIxPTR"  %-36s # (J) consumer  [%s | %s]\n",
-            ce->j_addr,ce->j_text,sym_j?sym_j:"(none)",file_j?file_j:"(unknown)");
+            ce->join_addr,ce->join_text,sym_j?sym_j:"(none)",file_j?file_j:"(unknown)");
     fprintf(f,"\n");
     free(sym_l);free(sym_e);free(sym_j);
     free(file_l);free(file_e);free(file_j);
