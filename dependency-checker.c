@@ -9,7 +9,6 @@ and the instruction is within a certain window size (16 in this case) of both L 
 
 #ifdef PLUGINS_NEW
 
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,10 +18,10 @@ and the instruction is within a certain window size (16 in this case) of both L 
 
 #include "../plugins.h"
 
-
 #define WINDOW_SIZE 16
 #define MAX_GAP     4
 #define CHAIN_MAP_INIT 1024
+
 typedef enum { INST_OTHER=0, INST_LONG=1, INST_EXPENSIVE=2 } inst_class_t;
 
 typedef struct {
@@ -49,13 +48,12 @@ typedef struct {
         uint64_t total_expensive;
         inst_info_t window[WINDOW_SIZE];
         int window_count;
+        mambo_ht_t *chain_map; /*key: long_addr ^ expensive_addr ^ join_addr, value: chain_entry_t* */
 } thread_data_t;
-
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static chain_entry_t *g_chain_list = NULL;  //global linked list of unique chains, protected by g_mutex
 static int g_next_chain_id = 0;             //global chain ID generator, protected by g_mutex
-
 
 /* for readable output */
 static const char *const rv_reg_abi[32] = {
@@ -143,7 +141,6 @@ static void decode_inst_info(mambo_context *ctx, inst_info_t *info) {
     if (info->dest_reg == 0) info->dest_reg = -1;
 }
 
-
 static bool detect_lej(
     const inst_info_t *window, int window_count,
     int l_idx, int e_idx,
@@ -183,18 +180,15 @@ static bool detect_lej(
     return true;
 }
 
-
 int dependency_checker_pre_thread(mambo_context *ctx){
     thread_data_t *t_data = (thread_data_t *)mambo_alloc(ctx, sizeof(thread_data_t));
     assert(t_data != NULL);
     memset(t_data, 0, sizeof(thread_data_t));
-    
     /*mambo hash table*/
     t_data->chain_map = (mambo_ht_t *)mambo_alloc(ctx, sizeof(mambo_ht_t));
     assert(t_data->chain_map != NULL);
     assert(mambo_ht_init(t_data->chain_map, CHAIN_MAP_INIT, 0, 80, true) == 0);
     /*mambo hash table*/
-
     assert(mambo_set_thread_plugin_data(ctx, t_data) == MAMBO_SUCCESS);
     return 0;
 }
@@ -202,13 +196,26 @@ int dependency_checker_pre_thread(mambo_context *ctx){
 int dependency_checker_post_thread(mambo_context *ctx){
    thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
    assert(t_data != NULL);
-   fprintf(stderr,
-        "[dep_chain] thread %d exited — "
-        "total=%"PRIu64" long=%"PRIu64" expensive=%"PRIu64"\n",
-        mambo_get_thread_id(ctx),
-        t_data->total_instr,
-        t_data->total_long,
-        t_data->total_expensive);
+
+  int thread_chains = 0;
+  for(int i = 0;  t_data->chain_map->size; i++){
+    if(t_data->chain_map->entries[i].key != 0) thread_chains++;
+  }
+
+  fprintf(stderr, "[dep_chain] thread %d — total=%"PRIu64
+          " long=%"PRIu64" expensive=%"PRIu64" chains=%d\n",
+          mambo_get_thread_id(ctx),
+          t_data->total_instr, t_data->total_long, t_data->total_expensive,
+          thread_chains);
+
+    for (int i = 0; i  < t_data->chain_map->size; i++) {
+      if (t_data->chain_map->entries[i].key == 0) continue;
+      chain_entry_t *ce = (chain_entry_t *)t_data->chain_map->entries[i].value;
+      fprintf(stderr, "[dep_chain]   chain_%d: count=%"PRIu64
+              " dep_regs=%s,%s\n",
+              ce->chain_id, ce->count,
+              REG_NAME(ce->dep_reg_l), REG_NAME(ce->dep_reg_e));
+    }
     return 0;
 }
 
@@ -218,18 +225,15 @@ int dependency_checker_pre_bb(mambo_context *ctx) {
   return 0;
 }
 
-
 int dependency_checker_pre_inst(mambo_context *ctx) {
     thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
     if (t_data == NULL) return 0;
 
-    void *pc = mambo_get_source_addr(ctx);
-    int   inst = mambo_get_inst(ctx);
-    inst_info_t curr_inst;
-
     emit_counter64_incr(ctx, &t_data->total_instr, 1);
 
+    inst_info_t curr_inst;
     decode_inst_info(ctx, &curr_inst);
+    
     if (curr_inst.iclass == INST_LONG) {
       emit_counter64_incr(ctx, &t_data->total_long, 1);
     } else if (curr_inst.iclass == INST_EXPENSIVE) {
@@ -240,26 +244,43 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
       /* Chain detection — fprintf only, no hash map yet */
     if (curr_inst.src_reg[0] >= 0 && curr_inst.src_reg[1] >= 0) {
      int wc = t_data->window_count;
-     for (int long_idx = 0; long_idx < wc; long_idx++) {
+     bool found = false;
+     for (int long_idx = 0; long_idx < wc && !found; long_idx++) {
        if (t_data->window[long_idx].iclass != INST_LONG) continue;
-       for (int expensive_idx = 0; expensive_idx < wc; expensive_idx++) {
+       for (int expensive_idx = 0; expensive_idx < wc && !found; expensive_idx++) {
          if (expensive_idx == long_idx || t_data->window[expensive_idx].iclass != INST_EXPENSIVE) continue;
          int rd_l = -1, rd_e = -1;
          if (!detect_lej(t_data->window, wc, long_idx, expensive_idx, &curr_inst, &rd_l, &rd_e)) continue;
-         fprintf(stderr,
-           "[dep_chain] CHAIN FOUND (scan time):\n"
-           "  L: %-36s @ 0x%"PRIxPTR"\n"
-           "  E: %-36s @ 0x%"PRIxPTR"\n"
-           "  J: %-36s @ 0x%"PRIxPTR"\n"
-           "  dep_regs: %s, %s\n",
-           t_data->window[long_idx].text, t_data->window[long_idx].pc,
-           t_data->window[expensive_idx].text, t_data->window[expensive_idx].pc,
-           curr_inst.text, curr_inst.pc,
-           REG_NAME(rd_l), REG_NAME(rd_e));
+        
+        uintptr_t key = t_data->window[long_idx].pc ^ t_data->window[expensive_idx].pc ^ curr_inst.pc;
+        chain_entry_t *entry = NULL;
+        if(mambo_ht_get(t_data->chain_map, key, (uintptr_t *)&entry) != 0){
+          entry  = (chain_entry_t *)mambo_alloc(ctx, sizeof(chain_entry_t));
+          assert(entry != NULL); memset(entry, 0, sizeof(chain_entry_t));
+          entry->long_addr = t_data->window[long_idx].pc; 
+          entry->expensive_addr = t_data->window[expensive_idx].pc; 
+          entry->join_addr = curr_inst.pc;
+          entry->dep_reg_l = rd_l;
+          entry->dep_reg_e = rd_e;
+          strncpy(entry->long_text, t_data->window[long_idx].text, sizeof(entry->long_text)-1);
+          strncpy(entry->expensive_text, t_data->window[expensive_idx].text, sizeof(entry->expensive_text)-1);
+          strncpy(entry->join_text, curr_inst.text, sizeof(entry->join_text)-1);
+          pthread_mutex_lock(&g_mutex);
+          entry->chain_id = ++g_next_chain_id;
+          entry->next = g_chain_list;
+          g_chain_list = entry;
+          pthread_mutex_unlock(&g_mutex);
+          mambo_ht_add(t_data->chain_map, key, (uintptr_t)entry);
+          fprintf(stderr,
+            "[dep_chain] chain_%d allocated (L=0x%"PRIxPTR
+            " E=0x%"PRIxPTR" J=0x%"PRIxPTR")\n",
+            entry->chain_id, entry->long_addr, entry->expensive_addr, entry->join_addr);
+        }
+        emit_counter64_incr(ctx, &entry->count, 1);
+        found = true;
        }
      }
     }
-
     /* Slide the window */
     if (t_data->window_count < WINDOW_SIZE) {
       t_data->window[t_data->window_count++] = curr_inst;
@@ -268,7 +289,6 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
               (WINDOW_SIZE - 1) * sizeof(inst_info_t));
       t_data->window[WINDOW_SIZE - 1] = curr_inst;
     }
-
     return 0;
 }
 
@@ -286,7 +306,5 @@ __attribute__((constructor)) void dependency_checker_init(void) {
     assert(ret == MAMBO_SUCCESS);
     ret = mambo_register_pre_inst_cb(ctx, dependency_checker_pre_inst);
     assert(ret == MAMBO_SUCCESS);
-
 }
-
 #endif /* PLUGINS_NEW */
