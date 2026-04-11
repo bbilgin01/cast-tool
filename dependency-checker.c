@@ -181,6 +181,73 @@ static bool detect_lej(
     return true;
 }
 
+static void write_stats(uint64_t total_occ, int unique, chain_entry_t *most_occ) {
+  FILE *f = fopen("stats.txt","w");
+  if (!f) { perror("[dep_chain] stats.txt"); return; }
+  fprintf(f,"================================================\n");
+  fprintf(f," LEJ Dependency Chain Detector -- Statistics\n");
+  fprintf(f,"================================================\n\n");
+  fprintf(f,"[Instruction Counts]\n");
+  fprintf(f,"  Total executed               : %"PRIu64"\n", g_total_instr);
+  fprintf(f,"  Expensive (mul/div/fmul/fdiv): %"PRIu64"\n", g_total_expensive);
+  fprintf(f,"  Long      (load)             : %"PRIu64"\n", g_total_long);
+  if (g_total_instr > 0) {
+    fprintf(f,"  %% Expensive / Total : %.4f%%\n",
+            100.0*(double)g_total_expensive/(double)g_total_instr);
+    fprintf(f,"  %% Long      / Total : %.4f%%\n",
+            100.0*(double)g_total_long/(double)g_total_instr);
+  }
+  fprintf(f,"\n[Chain Statistics]\n");
+  fprintf(f,"  Total executed               : %"PRIu64"\n", g_total_instr);
+  fprintf(f,"  LEJ chain occurrences (total): %"PRIu64"\n", total_occ);
+  fprintf(f,"  Unique LEJ chains detected   : %d\n",        unique);
+  if (g_total_instr > 0)
+    fprintf(f,"  %% LEJ chains / Total : %.4f%%\n",
+            100.0*(double)total_occ/(double)g_total_instr);
+  if (most_occ)
+    fprintf(f,"  Most occurred chain : chain_%d | %"PRIu64" occurrences\n",
+            most_occ->chain_id, most_occ->count);
+  else
+    fprintf(f,"  Most occurred chain : (none detected)\n");
+  fclose(f);
+  fprintf(stderr,"[dep_chain] stats.txt written.\n");
+}
+
+static void write_chains(void) {
+  FILE *f = fopen("chains.txt","w");
+  if (!f) { perror("[dep_chain] chains.txt"); return; }
+  fprintf(f,"================================================\n");
+  fprintf(f," LEJ Dependency Chain Detector -- Chain Detail\n");
+  fprintf(f,"================================================\n\n");
+  fprintf(f,"chain_<id> | dep_regs: <rd_L>, <rd_E> | occurred <N> times\n");
+  fprintf(f,"  <pc>  <instr>  # (L) producer  [sym | file]\n");
+  fprintf(f,"  <pc>  <instr>  # (E) producer  [sym | file]\n");
+  fprintf(f,"  <pc>  <instr>  # (J) consumer  [sym | file]\n\n");
+
+  for (chain_entry_t *ce = g_chain_list; ce; ce = ce->next) {
+    char *sym_l=NULL,*sym_e=NULL,*sym_j=NULL;
+    char *file_l=NULL,*file_e=NULL,*file_j=NULL;
+    void *sa_l=NULL,*sa_e=NULL,*sa_j=NULL;
+    get_symbol_info_by_addr(ce->l_addr,&sym_l,&sa_l,&file_l);
+    get_symbol_info_by_addr(ce->e_addr,&sym_e,&sa_e,&file_e);
+    get_symbol_info_by_addr(ce->j_addr,&sym_j,&sa_j,&file_j);
+    fprintf(f,"chain_%d | dep_regs: %s, %s | occurred %"PRIu64" times\n",
+            ce->chain_id,REG_NAME(ce->dep_reg_l),REG_NAME(ce->dep_reg_e),ce->count);
+    fprintf(f,"  0x%016"PRIxPTR"  %-36s # (L) producer  [%s | %s]\n",
+            ce->l_addr,ce->l_text,sym_l?sym_l:"(none)",file_l?file_l:"(unknown)");
+    fprintf(f,"  0x%016"PRIxPTR"  %-36s # (E) producer  [%s | %s]\n",
+            ce->e_addr,ce->e_text,sym_e?sym_e:"(none)",file_e?file_e:"(unknown)");
+    fprintf(f,"  0x%016"PRIxPTR"  %-36s # (J) consumer  [%s | %s]\n",
+            ce->j_addr,ce->j_text,sym_j?sym_j:"(none)",file_j?file_j:"(unknown)");
+    fprintf(f,"\n");
+    free(sym_l);free(sym_e);free(sym_j);
+    free(file_l);free(file_e);free(file_j);
+  }
+  fclose(f);
+  fprintf(stderr,"[dep_chain] chains.txt written.\n");
+}
+
+
 int dependency_checker_pre_thread(mambo_context *ctx){
     thread_data_t *t_data = (thread_data_t *)mambo_alloc(ctx, sizeof(thread_data_t));
     assert(t_data != NULL);
@@ -249,9 +316,9 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
      for (int long_idx = 0; long_idx < wc && !found; long_idx++) {
        if (t_data->window[long_idx].iclass != INST_LONG) continue;
        for (int expensive_idx = 0; expensive_idx < wc && !found; expensive_idx++) {
-         if (expensive_idx == long_idx || t_data->window[expensive_idx].iclass != INST_EXPENSIVE) continue;
-         int rd_l = -1, rd_e = -1;
-         if (!detect_lej(t_data->window, wc, long_idx, expensive_idx, &curr_inst, &rd_l, &rd_e)) continue;
+        if (expensive_idx == long_idx || t_data->window[expensive_idx].iclass != INST_EXPENSIVE) continue;
+        int rd_l = -1, rd_e = -1;
+        if (!detect_lej(t_data->window, wc, long_idx, expensive_idx, &curr_inst, &rd_l, &rd_e)) continue;
         
         uintptr_t key = t_data->window[long_idx].pc ^ t_data->window[expensive_idx].pc ^ curr_inst.pc;
         chain_entry_t *entry = NULL;
@@ -293,6 +360,17 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
     return 0;
 }
 
+int dependency_checker_exit(mambo_context *ctx) {
+  uint64_t total_occ=0; int unique=0; chain_entry_t *most_occ=NULL;
+  for (chain_entry_t *ce=g_chain_list;ce;ce=ce->next) {
+    unique++; total_occ+=ce->count;
+    if (!most_occ||ce->count>most_occ->count) most_occ=ce;
+  }
+  write_stats(total_occ,unique,most_occ);
+  write_chains();
+  return 0;
+}
+
 __attribute__((constructor)) void dependency_checker_init(void) {
 
     mambo_context *ctx = mambo_register_plugin();
@@ -306,6 +384,8 @@ __attribute__((constructor)) void dependency_checker_init(void) {
     ret = mambo_register_pre_basic_block_cb(ctx, dependency_checker_pre_bb);
     assert(ret == MAMBO_SUCCESS);
     ret = mambo_register_pre_inst_cb(ctx, dependency_checker_pre_inst);
+    assert(ret == MAMBO_SUCCESS);
+    ret= mambo_register_exit_cb(ctx, dependency_checker_exit);
     assert(ret == MAMBO_SUCCESS);
 }
 #endif /* PLUGINS_NEW */
