@@ -55,6 +55,9 @@ typedef struct {
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static chain_entry_t *g_chain_list = NULL;  //global linked list of unique chains, protected by g_mutex
 static int g_next_chain_id = 0;             //global chain ID generator, protected by g_mutex
+static uint64_t         g_total_instr     = 0;
+static uint64_t         g_total_long      = 0;
+static uint64_t         g_total_expensive = 0;
 
 /* for readable output */
 static const char *const rv_reg_abi[32] = {
@@ -262,28 +265,15 @@ int dependency_checker_pre_thread(mambo_context *ctx){
 }
 
 int dependency_checker_post_thread(mambo_context *ctx){
-   thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
-   assert(t_data != NULL);
-
-  int thread_chains = 0;
-  for(int i = 0; i < t_data->chain_map->size; i++){
-    if(t_data->chain_map->entries[i].key != 0) thread_chains++;
-  }
-
-  fprintf(stderr, "[dep_chain] thread %d — total=%"PRIu64
-          " long=%"PRIu64" expensive=%"PRIu64" chains=%d\n",
+  thread_data_t *t_data = (thread_data_t *)mambo_get_thread_plugin_data(ctx);
+  assert(t_data != NULL);
+  atomic_increment_u64(&g_total_instr,     t_data->total_instr);
+  atomic_increment_u64(&g_total_long,      t_data->total_long);
+  atomic_increment_u64(&g_total_expensive, t_data->total_expensive);
+  fprintf(stderr,"[dep_chain] thread %d exited — total=%"PRIu64
+          " long=%"PRIu64" expensive=%"PRIu64"\n",
           mambo_get_thread_id(ctx),
-          t_data->total_instr, t_data->total_long, t_data->total_expensive,
-          thread_chains);
-
-    for (int i = 0; i  < t_data->chain_map->size; i++) {
-      if (t_data->chain_map->entries[i].key == 0) continue;
-      chain_entry_t *ce = (chain_entry_t *)t_data->chain_map->entries[i].value;
-      fprintf(stderr, "[dep_chain]   chain_%d: count=%"PRIu64
-              " dep_regs=%s,%s\n",
-              ce->chain_id, ce->count,
-              REG_NAME(ce->dep_reg_l), REG_NAME(ce->dep_reg_e));
-    }
+          t_data->total_instr,t_data->total_long,t_data->total_expensive);
     return 0;
 }
 
