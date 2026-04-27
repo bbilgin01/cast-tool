@@ -130,6 +130,7 @@ typedef struct {
   uint64_t total_long;
   uint64_t total_expensive;
   uint64_t total_expensive_by_kind[EXPENSIVE_KIND_COUNT];
+  uint64_t total_hotspot_instr;
   inst_info_t window[WINDOW_SIZE];
   int window_count;
   mambo_ht_t *chain_map; // hash -> local_chain_counter_t* collision list
@@ -145,6 +146,7 @@ static uint64_t g_total_instr = 0;
 static uint64_t g_total_long = 0;
 static uint64_t g_total_expensive = 0;
 static uint64_t g_total_expensive_by_kind[EXPENSIVE_KIND_COUNT] = {0};
+static uint64_t g_total_hotspot_instr = 0;
 
 static const char *const rv_reg_abi[32] = {
   "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
@@ -260,6 +262,14 @@ static double percentage_u64(uint64_t numerator, uint64_t denominator) {
   return denominator > 0
              ? (100.0 * (double)numerator / (double)denominator)
              : 0.0;
+}
+
+static uint64_t chain_instruction_slots(uint64_t chain_occurrences) {
+  if (chain_occurrences > UINT64_MAX / 3) {
+    return UINT64_MAX;
+  }
+
+  return chain_occurrences * 3;
 }
 
 static uintptr_t hash_chain_key(uintptr_t long_addr, uintptr_t expensive_addr,
@@ -1084,6 +1094,7 @@ static void write_stats(const analysis_data_t *analysis) {
   fprintf(stats_file, "================================================\n\n");
   fprintf(stats_file, "[Instruction Counts]\n");
   fprintf(stats_file, "  Total executed               : %" PRIu64 "\n", g_total_instr);
+  fprintf(stats_file, "  Hotspot executed             : %" PRIu64 "\n", g_total_hotspot_instr);
   fprintf(stats_file, "  Expensive (mul/div/rem/fmul/fdiv): %" PRIu64 "\n",
           g_total_expensive);
   fprintf(stats_file, "  Long      (load)             : %" PRIu64 "\n", g_total_long);
@@ -1105,6 +1116,25 @@ static void write_stats(const analysis_data_t *analysis) {
           analysis->total_occurrences);
   fprintf(stats_file, "  Unique LEJ chains detected   : %zu\n",
           analysis->chain_count);
+
+  uint64_t most_common_chain_slots =
+      analysis->most_common_chain != NULL
+          ? chain_instruction_slots(analysis->most_common_chain->count)
+          : 0;
+  uint64_t total_chain_slots =
+      chain_instruction_slots(analysis->total_occurrences);
+
+  fprintf(stats_file, "  Most occurred chain * 3      : %" PRIu64 " instruction slots\n",
+          most_common_chain_slots);
+  fprintf(stats_file, "  Total chain occurrences * 3  : %" PRIu64 " instruction slots\n",
+          total_chain_slots);
+
+  if (g_total_hotspot_instr > 0) {
+    fprintf(stats_file, "  %% Most chain*3 / Hotspot dyn instr : %.4f%%\n",
+            percentage_u64(most_common_chain_slots, g_total_hotspot_instr));
+    fprintf(stats_file, "  %% Total chain*3 / Hotspot dyn instr: %.4f%%\n",
+            percentage_u64(total_chain_slots, g_total_hotspot_instr));
+  }
 
   if (g_total_instr > 0) {
     fprintf(stats_file, "  %% LEJ chains / Total : %.4f%%\n",
@@ -1282,15 +1312,17 @@ int dependency_checker_post_thread(mambo_context *ctx) {
   atomic_increment_u64(&g_total_instr, t_data->total_instr);
   atomic_increment_u64(&g_total_long, t_data->total_long);
   atomic_increment_u64(&g_total_expensive, t_data->total_expensive);
+  atomic_increment_u64(&g_total_hotspot_instr, t_data->total_hotspot_instr);
   for (int kind = EXPENSIVE_KIND_MUL; kind < EXPENSIVE_KIND_COUNT; kind++) {
     atomic_increment_u64(&g_total_expensive_by_kind[kind],
                          t_data->total_expensive_by_kind[kind]);
   }
 
   fprintf(stderr, "[dep_chain] thread %d exited - total=%" PRIu64
-          " long=%" PRIu64 " expensive=%" PRIu64 "\n",
+          " hotspot=%" PRIu64 " long=%" PRIu64 " expensive=%" PRIu64 "\n",
           mambo_get_thread_id(ctx), t_data->total_instr,
-          t_data->total_long, t_data->total_expensive);
+          t_data->total_hotspot_instr, t_data->total_long,
+          t_data->total_expensive);
 
   if (t_data->chain_map != NULL) {
     for (size_t index = 0; index < t_data->chain_map->size; index++) {
@@ -1355,6 +1387,7 @@ int dependency_checker_pre_inst(mambo_context *ctx) {
   }
 
   emit_counter64_incr(ctx, &t_data->total_instr, 1);
+  emit_counter64_incr(ctx, &t_data->total_hotspot_instr, 1);
   decode_inst_info(ctx, &curr_inst);
 
   if (curr_inst.iclass == INST_LONG) {
